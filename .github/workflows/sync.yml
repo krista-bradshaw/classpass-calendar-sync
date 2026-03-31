@@ -1,0 +1,30 @@
+name: ClassPass Calendar Sync
+
+on:
+  schedule:
+    # Runs every day at 8am London time (7am UTC in winter, 6am UTC in summer)
+    - cron: '0 7 * * *'
+  workflow_dispatch: # allows manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run sync
+        env:
+          CLASSPASS_EMAIL:    ${{ secrets.CLASSPASS_EMAIL }}
+          CLASSPASS_PASSWORD: ${{ secrets.CLASSPASS_PASSWORD }}
+          APPLE_ID:           ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CALENDAR_NAME:      ${{ secrets.CALENDAR_NAME }}
+        run: python sync_github.py
