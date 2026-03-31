@@ -1,0 +1,1 @@
+# classpass-calendar-sync
