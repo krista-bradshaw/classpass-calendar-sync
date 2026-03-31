@@ -245,6 +245,7 @@ class CalDAVClient:
   </d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", home_url, body, {"Depth": "1"})
+        print(f"DEBUG full calendar response: {resp.text}")
         calendars = []
         print(f"DEBUG full calendar list response: {resp.text[:2000]}")
         for response in re.finditer(
@@ -381,11 +382,8 @@ def sync():
 
     if raw:
         r = raw[0]
-        print(f'DEBUG starttime: {r.get("starttime")}')
-        print(f'DEBUG start_instant: {r.get("start_instant")}')
-        print(f'DEBUG start_date: {r.get("start_date")}')
-        print(f'DEBUG class: {r.get("class")}')
-        print(f'DEBUG venue: {r.get("venue")}')
+        print(f'DEBUG starttime raw value: {repr(r.get("starttime"))}')
+        print(f'DEBUG class raw value: {repr(r.get("class"))}')
 
     bookings = [parse_reservation(r) for r in raw]
     bookings = [b for b in bookings if b]
