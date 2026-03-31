@@ -1,6 +1,9 @@
 name: ClassPass Calendar Sync
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 20 * * *'
   workflow_dispatch:
