@@ -2,8 +2,6 @@
 """
 ClassPass → iCloud Calendar sync
 Runs on GitHub Actions on a schedule.
-Logs into ClassPass fresh each run, fetches upcoming reservations,
-diffs against iCloud calendar via CalDAV, adds/removes events.
 """
 
 import os
@@ -14,7 +12,6 @@ import base64
 import requests
 from datetime import datetime, timezone, timedelta
 
-# ── Config from environment variables ──────────────────────────────────────
 CLASSPASS_EMAIL = os.environ["CLASSPASS_EMAIL"]
 CLASSPASS_PASSWORD = os.environ["CLASSPASS_PASSWORD"]
 APPLE_ID = os.environ["APPLE_ID"]
@@ -24,16 +21,13 @@ CALENDAR_NAME = os.environ.get("CALENDAR_NAME", "pilates 🤸")
 CLASSPASS_BASE = "https://classpass.com"
 CALDAV_BASE = "https://caldav.icloud.com"
 
-# ── ClassPass auth (via Playwright headless browser) ────────────────────────
 
-
-def classpass_login():
-    """Log in to ClassPass using a real headless browser to bypass Cloudflare."""
+def classpass_login_and_fetch():
+    """Log in and fetch reservations entirely within the browser to avoid Cloudflare."""
     from playwright.sync_api import sync_playwright
 
     token = None
     user_id = None
-    cookies = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -44,7 +38,6 @@ def classpass_login():
         )
         page = context.new_page()
 
-        # Intercept API responses to grab token and user ID
         def handle_response(response):
             nonlocal token, user_id
             if "_api/bff/v1" in response.url and response.status == 200:
@@ -65,7 +58,6 @@ def classpass_login():
         print("→ Opening ClassPass login page...")
         page.goto(f"{CLASSPASS_BASE}/login", wait_until="networkidle")
 
-        # Dismiss cookie/consent banners via JS before interacting
         print("→ Dismissing consent banners...")
         page.wait_for_timeout(1000)
         page.evaluate(
@@ -80,27 +72,21 @@ def classpass_login():
         print("→ Filling credentials...")
         page.fill('input[type="email"], input[name="email"]', CLASSPASS_EMAIL)
         page.fill('input[type="password"], input[name="password"]', CLASSPASS_PASSWORD)
-
-        # Use JS click to bypass any remaining overlays
         page.evaluate("document.querySelector(\"button[type='submit']\").click()")
 
         print("→ Waiting for login...")
-        # Wait for navigation away from login page (could go to /search, /profile, etc.)
         page.wait_for_function(
             "!window.location.href.includes('/login')", timeout=20000
         )
         print(f"→ Landed on: {page.url}")
 
-        # Extract token from CP.SID cookie if not intercepted
         if not token:
-            all_cookies = context.cookies()
             cp_sid = next(
-                (c["value"] for c in all_cookies if c["name"] == "CP.SID"), None
+                (c["value"] for c in context.cookies() if c["name"] == "CP.SID"), None
             )
             if cp_sid:
                 try:
-                    padded = cp_sid + "=="
-                    decoded = json.loads(base64.b64decode(padded).decode())
+                    decoded = json.loads(base64.b64decode(cp_sid + "==").decode())
                     token = decoded.get("authToken")
                 except Exception:
                     pass
@@ -108,58 +94,46 @@ def classpass_login():
         if not token:
             raise Exception("Could not extract auth token after login")
 
-        # Navigate to upcoming to get user_id if still missing
+        print("→ Navigating to upcoming bookings...")
+        page.goto(f"{CLASSPASS_BASE}/profile/upcoming", wait_until="networkidle")
+        page.wait_for_timeout(2000)
+
         if not user_id:
-            page.goto(f"{CLASSPASS_BASE}/profile/upcoming", wait_until="networkidle")
-            # user_id should be captured via response interceptor now
+            raise Exception("Could not determine user_id")
 
-        cookies = context.cookies()
-        browser.close()
-
-    print(f"✓ Logged into ClassPass (user_id: {user_id})")
-
-    # Build a requests session using the browser cookies
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-            "cp-authorization": f"Token {token}",
-            "platform": "web",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-    )
-    for c in cookies:
-        session.cookies.set(c["name"], c["value"], domain=c.get("domain", ""))
-
-    return session, token, user_id
-
-
-def get_reservations(session, user_id):
-    """Fetch upcoming reservations from ClassPass."""
-    resp = session.get(
-        f"{CLASSPASS_BASE}/_api/bff/v1/users/{user_id}/reservations",
-        headers={"Referer": f"{CLASSPASS_BASE}/profile/upcoming"},
-    )
-    if resp.status_code != 200:
-        raise Exception(
-            f"Could not fetch reservations: {resp.status_code} {resp.text[:200]}"
+        print(f"→ Fetching reservations for user {user_id}...")
+        raw = page.evaluate(
+            f"""
+            async () => {{
+                const resp = await fetch('/_api/bff/v1/users/{user_id}/reservations', {{
+                    headers: {{
+                        'cp-authorization': 'Token {token}',
+                        'content-type': 'application/json',
+                        'platform': 'web',
+                    }}
+                }});
+                return await resp.text();
+            }}
+        """
         )
 
-    data = resp.json()
-    reservations = (
-        data
-        if isinstance(data, list)
-        else data.get("reservations", data.get("data", []))
-    )
-    print(f"✓ Found {len(reservations)} upcoming reservation(s)")
+        browser.close()
+
+    try:
+        data = json.loads(raw)
+        reservations = (
+            data
+            if isinstance(data, list)
+            else data.get("reservations", data.get("data", []))
+        )
+        print(f"✓ Found {len(reservations)} upcoming reservation(s)")
+    except Exception as e:
+        raise Exception(f"Could not parse reservations response: {e}\nRaw: {raw[:300]}")
+
     return reservations
 
 
 def parse_reservation(r):
-    """Normalise a reservation dict into a consistent shape."""
-
-    # ClassPass API field names vary -- try multiple
     def get(*keys):
         for k in keys:
             v = r.get(k)
@@ -171,8 +145,6 @@ def parse_reservation(r):
     studio = get("studio_name", "studioName", "venue_name", "venueName") or ""
     address = get("address", "studio_address", "location") or ""
     res_id = str(get("id", "reservation_id", "reservationId") or uuid.uuid4())
-
-    # Parse start/end times
     start_str = get("starts_at", "start_time", "startTime", "start_datetime")
     end_str = get("ends_at", "end_time", "endTime", "end_datetime")
 
@@ -203,9 +175,6 @@ def parse_reservation(r):
     }
 
 
-# ── CalDAV / iCloud ─────────────────────────────────────────────────────────
-
-
 class CalDAVClient:
     def __init__(self, username, password):
         self.username = username
@@ -218,12 +187,9 @@ class CalDAVClient:
         h = {"Content-Type": "application/xml; charset=utf-8"}
         if headers:
             h.update(headers)
-        resp = self.session.request(method, url, data=body, headers=h)
-        return resp
+        return self.session.request(method, url, data=body, headers=h)
 
     def discover(self):
-        """Discover the calendar URL for CALENDAR_NAME."""
-        # Step 1: principal
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop><d:current-user-principal/></d:prop>
@@ -238,7 +204,6 @@ class CalDAVClient:
         if not principal_url.startswith("http"):
             principal_url = CALDAV_BASE + principal_url
 
-        # Step 2: calendar home
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:prop><c:calendar-home-set/></d:prop>
@@ -253,7 +218,6 @@ class CalDAVClient:
         if not home_url.startswith("http"):
             home_url = CALDAV_BASE + home_url
 
-        # Step 3: list calendars
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:prop>
@@ -262,7 +226,6 @@ class CalDAVClient:
   </d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", home_url, body, {"Depth": "1"})
-
         calendars = []
         for response in re.finditer(
             r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
@@ -282,7 +245,6 @@ class CalDAVClient:
                 calendars.append((name, url))
 
         print(f"✓ Available calendars: {[c[0] for c in calendars]}")
-
         match = next((c for c in calendars if c[0] == CALENDAR_NAME), None)
         if not match:
             raise Exception(
@@ -290,11 +252,10 @@ class CalDAVClient:
             )
 
         self.calendar_url = match[1]
-        print(f"✓ Using calendar: {CALENDAR_NAME} ({self.calendar_url})")
+        print(f"✓ Using calendar: {CALENDAR_NAME}")
         return self.calendar_url
 
     def get_classpass_events(self):
-        """Fetch all events tagged as ClassPass synced."""
         if not self.calendar_url:
             self.discover()
 
@@ -317,7 +278,6 @@ class CalDAVClient:
 </c:calendar-query>"""
 
         resp = self._request("REPORT", self.calendar_url, body, {"Depth": "1"})
-
         events = []
         for response in re.finditer(
             r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
@@ -369,9 +329,6 @@ class CalDAVClient:
             raise Exception(f"DELETE failed: {resp.status_code}")
 
 
-# ── iCal helpers ─────────────────────────────────────────────────────────────
-
-
 def fmt_ical(dt):
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
@@ -399,28 +356,18 @@ def build_ical(booking, uid):
     return "\r\n".join(lines)
 
 
-# ── Diff + sync ───────────────────────────────────────────────────────────────
-
-
 def sync():
     print("=== ClassPass Calendar Sync ===")
 
-    # 1. Login to ClassPass
-    session, _, user_id = classpass_login()
-
-    raw = get_reservations(session, user_id)
-
-    # 2. Parse reservations
+    raw = classpass_login_and_fetch()
     bookings = [parse_reservation(r) for r in raw]
     bookings = [b for b in bookings if b]
     print(f"✓ Parsed {len(bookings)} valid booking(s)")
 
-    # 3. Connect to CalDAV
     client = CalDAVClient(APPLE_ID, APPLE_APP_PASSWORD)
     client.discover()
     existing = client.get_classpass_events()
 
-    # 4. Diff
     existing_keys = set()
     for ev in existing:
         if ev["summary"] and ev["dtstart"]:
@@ -446,14 +393,13 @@ def sync():
     print(f"\n→ To add:    {len(to_add)}")
     print(f"→ To remove: {len(to_remove)}")
 
-    # 5. Apply
     created = 0
     removed = 0
     errors = []
 
     for b in to_add:
         try:
-            uid = client.create_event(b)
+            client.create_event(b)
             print(
                 f'  ✓ Added: {b["className"]} @ {b["studio"]} on {b["startDate"][:10]}'
             )
