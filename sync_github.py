@@ -134,19 +134,18 @@ def classpass_login_and_fetch():
 
 
 def parse_reservation(r):
-    def get(*keys):
-        for k in keys:
-            v = r.get(k)
-            if v is not None:
-                return v
-        return None
+    res_id = str(r.get("id") or uuid.uuid4())
 
-    class_name = get("class_name", "className", "name", "title") or "ClassPass Class"
-    studio = get("studio_name", "studioName", "venue_name", "venueName") or ""
-    address = get("address", "studio_address", "location") or ""
-    res_id = str(get("id", "reservation_id", "reservationId") or uuid.uuid4())
-    start_str = get("starts_at", "start_time", "startTime", "start_datetime")
-    end_str = get("ends_at", "end_time", "endTime", "end_datetime")
+    # Class details are nested under 'class' and 'venue'
+    class_obj = r.get("class") or {}
+    venue_obj = r.get("venue") or {}
+
+    class_name = class_obj.get("name") or class_obj.get("title") or "ClassPass Class"
+    studio = venue_obj.get("name") or ""
+    address = venue_obj.get("address") or venue_obj.get("full_address") or ""
+
+    start_str = r.get("starttime") or r.get("start_instant") or r.get("start_date")
+    end_str = r.get("endtime") or r.get("end_instant")
 
     if not start_str:
         return None
@@ -162,8 +161,7 @@ def parse_reservation(r):
         except Exception:
             end_dt = start_dt + timedelta(hours=1)
     else:
-        duration = get("duration_minutes", "duration") or 60
-        end_dt = start_dt + timedelta(minutes=int(duration))
+        end_dt = start_dt + timedelta(hours=1)
 
     return {
         "id": res_id,
