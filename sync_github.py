@@ -16,7 +16,7 @@ CLASSPASS_EMAIL = os.environ["CLASSPASS_EMAIL"]
 CLASSPASS_PASSWORD = os.environ["CLASSPASS_PASSWORD"]
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
-CALENDAR_NAME = os.environ.get("CALENDAR_NAME", "calendar")
+CALENDAR_NAME = os.environ.get("CALENDAR_NAME", "Calendar")
 
 CLASSPASS_BASE = "https://classpass.com"
 CALDAV_BASE = "https://caldav.icloud.com"
@@ -266,7 +266,6 @@ class CalDAVClient:
                 name = dname.group(1)
                 calendars.append((name, url))
 
-        print(f"✓ Available calendars: {[c[0] for c in calendars]}")
         match = next((c for c in calendars if c[0] == CALENDAR_NAME), None)
         if not match:
             raise Exception(
@@ -274,7 +273,6 @@ class CalDAVClient:
             )
 
         self.calendar_url = match[1]
-        print(f"✓ Using calendar: {CALENDAR_NAME}")
         return self.calendar_url
 
     def get_classpass_events(self):
