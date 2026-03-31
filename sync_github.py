@@ -140,7 +140,16 @@ def parse_reservation(r):
 
     class_name = class_obj.get("name") or class_obj.get("title") or "ClassPass Class"
     studio = venue_obj.get("name") or ""
-    address = venue_obj.get("address") or venue_obj.get("full_address") or ""
+    address_raw = venue_obj.get("address") or {}
+    if isinstance(address_raw, dict):
+        parts = [
+            address_raw.get("address_line1", ""),
+            address_raw.get("city", ""),
+            address_raw.get("zip_code", ""),
+        ]
+        address = ", ".join(p for p in parts if p)
+    else:
+        address = str(address_raw)
 
     start_raw = r.get("starttime") or r.get("start_instant") or r.get("start_date")
     end_raw = r.get("endtime") or r.get("end_instant")
