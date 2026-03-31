@@ -190,33 +190,56 @@ class CalDAVClient:
         return self.session.request(method, url, data=body, headers=h)
 
     def discover(self):
-        body = """<?xml version="1.0" encoding="UTF-8"?>
+        principal_url = None
+
+        for url in [
+            f"{CALDAV_BASE}/.well-known/caldav",
+            f"{CALDAV_BASE}/",
+        ]:
+            try:
+                resp = self._request(
+                    "PROPFIND",
+                    url,
+                    """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop><d:current-user-principal/></d:prop>
-</d:propfind>"""
-        resp = self._request(
-            "PROPFIND", f"{CALDAV_BASE}/.well-known/caldav", body, {"Depth": "0"}
-        )
-        principal = re.search(r"<d:href>(.*?)</d:href>", resp.text)
-        if not principal:
+</d:propfind>""",
+                    {"Depth": "0"},
+                )
+                print(f"DEBUG CalDAV {url}: {resp.status_code} {resp.text[:500]}")
+                match = re.search(r"<[^>]*href[^>]*>(.*?)</[^>]*href>", resp.text)
+                if match:
+                    principal_url = match.group(1)
+                    if not principal_url.startswith("http"):
+                        principal_url = CALDAV_BASE + principal_url
+                    break
+            except Exception as e:
+                print(f"DEBUG CalDAV {url} failed: {e}")
+
+        if not principal_url:
             raise Exception("Could not find CalDAV principal")
-        principal_url = principal.group(1)
-        if not principal_url.startswith("http"):
-            principal_url = CALDAV_BASE + principal_url
+
+        print(f"→ Principal URL: {principal_url}")
 
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:prop><c:calendar-home-set/></d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", principal_url, body, {"Depth": "0"})
+        print(f"DEBUG calendar-home-set response: {resp.status_code} {resp.text[:500]}")
+
         home = re.search(
-            r"calendar-home-set.*?<d:href>(.*?)</d:href>", resp.text, re.DOTALL
+            r"calendar-home-set.*?<[^>]*href[^>]*>(.*?)</[^>]*href>",
+            resp.text,
+            re.DOTALL,
         )
         if not home:
             raise Exception("Could not find calendar home")
         home_url = home.group(1)
         if not home_url.startswith("http"):
             home_url = CALDAV_BASE + home_url
+
+        print(f"→ Calendar home: {home_url}")
 
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -226,6 +249,8 @@ class CalDAVClient:
   </d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", home_url, body, {"Depth": "1"})
+        print(f"DEBUG calendar list response: {resp.status_code} {resp.text[:500]}")
+
         calendars = []
         for response in re.finditer(
             r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
@@ -360,70 +385,16 @@ def sync():
     print("=== ClassPass Calendar Sync ===")
 
     raw = classpass_login_and_fetch()
+
+    # Debug: print first reservation's keys so we can see the field names
+    if raw:
+        print(
+            f"DEBUG first reservation keys: {list(raw[0].keys()) if isinstance(raw[0], dict) else raw[0]}"
+        )
+
     bookings = [parse_reservation(r) for r in raw]
     bookings = [b for b in bookings if b]
     print(f"✓ Parsed {len(bookings)} valid booking(s)")
-
-    client = CalDAVClient(APPLE_ID, APPLE_APP_PASSWORD)
-    client.discover()
-    existing = client.get_classpass_events()
-
-    existing_keys = set()
-    for ev in existing:
-        if ev["summary"] and ev["dtstart"]:
-            existing_keys.add(ev["summary"] + "|" + ev["dtstart"][:8])
-
-    booking_keys = set()
-    to_add = []
-    for b in bookings:
-        start = datetime.fromisoformat(b["startDate"].replace("Z", "+00:00"))
-        title = f'{b["className"]} @ {b["studio"]}'
-        key = title + "|" + start.strftime("%Y%m%d")
-        booking_keys.add(key)
-        if key not in existing_keys:
-            to_add.append(b)
-
-    to_remove = []
-    for ev in existing:
-        if ev["summary"] and ev["dtstart"]:
-            key = ev["summary"] + "|" + ev["dtstart"][:8]
-            if key not in booking_keys:
-                to_remove.append(ev)
-
-    print(f"\n→ To add:    {len(to_add)}")
-    print(f"→ To remove: {len(to_remove)}")
-
-    created = 0
-    removed = 0
-    errors = []
-
-    for b in to_add:
-        try:
-            client.create_event(b)
-            print(
-                f'  ✓ Added: {b["className"]} @ {b["studio"]} on {b["startDate"][:10]}'
-            )
-            created += 1
-        except Exception as e:
-            msg = f'Failed to add "{b["className"]}": {e}'
-            print(f"  ✗ {msg}")
-            errors.append(msg)
-
-    for ev in to_remove:
-        try:
-            client.delete_event(ev["href"])
-            print(f'  ✓ Removed: {ev["summary"]}')
-            removed += 1
-        except Exception as e:
-            msg = f'Failed to remove "{ev["summary"]}": {e}'
-            print(f"  ✗ {msg}")
-            errors.append(msg)
-
-    print(f"\n=== Done: {created} added, {removed} removed, {len(errors)} errors ===")
-    if errors:
-        for e in errors:
-            print(f"  ✗ {e}")
-        raise SystemExit(1)
 
 
 if __name__ == "__main__":
