@@ -142,24 +142,25 @@ def parse_reservation(r):
     studio = venue_obj.get("name") or ""
     address = venue_obj.get("address") or venue_obj.get("full_address") or ""
 
-    start_str = r.get("starttime") or r.get("start_instant") or r.get("start_date")
-    end_str = r.get("endtime") or r.get("end_instant")
+    start_raw = r.get("starttime") or r.get("start_instant") or r.get("start_date")
+    end_raw = r.get("endtime") or r.get("end_instant")
 
-    if not start_str:
+    if not start_raw:
         return None
 
-    try:
-        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-    if end_str:
+    def parse_dt(val):
+        if isinstance(val, (int, float)):
+            return datetime.fromtimestamp(val, tz=timezone.utc)
         try:
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
         except Exception:
-            end_dt = start_dt + timedelta(hours=1)
-    else:
-        end_dt = start_dt + timedelta(hours=1)
+            return None
+
+    start_dt = parse_dt(start_raw)
+    if not start_dt:
+        return None
+
+    end_dt = parse_dt(end_raw) if end_raw else start_dt + timedelta(hours=1)
 
     return {
         "id": res_id,
