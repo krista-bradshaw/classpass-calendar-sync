@@ -162,6 +162,7 @@ def parse_reservation(r):
         "className": class_name,
         "studio": studio,
         "address": address,
+        "description": class_obj.get("description") or "",
         "startDate": start_dt.isoformat(),
         "endDate": end_dt.isoformat(),
     }

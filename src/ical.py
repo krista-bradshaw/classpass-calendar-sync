@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+
 def fmt_ical(dt):
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
@@ -18,7 +19,7 @@ def build_ical(booking, uid):
         f"DTEND:{fmt_ical(end)}",
         f'SUMMARY:{booking["className"]} @ {booking["studio"]}',
         f'LOCATION:{booking["address"]}',
-        f"DESCRIPTION:ClassPass booking synced automatically",
+        f'DESCRIPTION:{booking.get("description", "ClassPass booking synced automatically")}',
         "CATEGORIES:CLASSPASS-SYNC",
         "X-CLASSPASS-SYNC:true",
         "END:VEVENT",
