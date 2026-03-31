@@ -56,7 +56,7 @@ def classpass_login_and_fetch():
         page.on("response", handle_response)
 
         print("→ Opening ClassPass login page...")
-        page.goto(f"{CLASSPASS_BASE}/login", wait_until="networkidle")
+        page.goto(f"{CLASSPASS_BASE}/login", wait_until="domcontentloaded")
 
         print("→ Dismissing consent banners...")
         page.wait_for_timeout(1000)
@@ -95,7 +95,7 @@ def classpass_login_and_fetch():
             raise Exception("Could not extract auth token after login")
 
         print("→ Navigating to upcoming bookings...")
-        page.goto(f"{CLASSPASS_BASE}/profile/upcoming", wait_until="networkidle")
+        page.goto(f"{CLASSPASS_BASE}/profile/upcoming", wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
         if not user_id:
