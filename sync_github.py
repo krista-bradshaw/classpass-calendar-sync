@@ -16,7 +16,7 @@ CLASSPASS_EMAIL = os.environ["CLASSPASS_EMAIL"]
 CLASSPASS_PASSWORD = os.environ["CLASSPASS_PASSWORD"]
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
-CALENDAR_NAME = os.environ.get("CALENDAR_NAME", "pilates 🤸")
+CALENDAR_NAME = os.environ.get("CALENDAR_NAME", "calendar")
 
 CLASSPASS_BASE = "https://classpass.com"
 CALDAV_BASE = "https://caldav.icloud.com"
@@ -161,6 +161,8 @@ def parse_reservation(r):
         return None
 
     end_dt = parse_dt(end_raw) if end_raw else start_dt + timedelta(hours=1)
+    if not end_dt:
+        end_dt = start_dt + timedelta(hours=1)
 
     return {
         "id": res_id,
@@ -203,8 +205,7 @@ class CalDAVClient:
 </d:propfind>""",
                     {"Depth": "0"},
                 )
-                print(f"DEBUG CalDAV {url}: {resp.status_code} {resp.text[:300]}")
-                match = re.search(r"<[^>]*href[^>]*>(.*?)</[^>]*href>", resp.text)
+                match = re.search(r"<href[^>]*>(.*?)</href>", resp.text)
                 if match:
                     principal_url = match.group(1)
                     if not principal_url.startswith("http"):
@@ -216,27 +217,19 @@ class CalDAVClient:
         if not principal_url:
             raise Exception("Could not find CalDAV principal")
 
-        print(f"→ Principal URL: {principal_url}")
-
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:prop><c:calendar-home-set/></d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", principal_url, body, {"Depth": "0"})
-        print(f"DEBUG calendar-home-set: {resp.status_code} {resp.text[:300]}")
-
         home = re.search(
-            r"calendar-home-set.*?<[^>]*href[^>]*>(.*?)</[^>]*href>",
-            resp.text,
-            re.DOTALL,
+            r"calendar-home-set.*?<href[^>]*>(.*?)</href>", resp.text, re.DOTALL
         )
         if not home:
             raise Exception("Could not find calendar home")
         home_url = home.group(1)
         if not home_url.startswith("http"):
             home_url = CALDAV_BASE + home_url
-
-        print(f"→ Calendar home: {home_url}")
 
         body = """<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -246,22 +239,22 @@ class CalDAVClient:
   </d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", home_url, body, {"Depth": "1"})
-        print(f"DEBUG full calendar response: {resp.text}")
         calendars = []
-        print(f"DEBUG full calendar list response: {resp.text[:2000]}")
         for response in re.finditer(
-            r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
+            r"<response[^>]*>(.*?)</response>", resp.text, re.DOTALL
         ):
             block = response.group(1)
-            href = re.search(r"<d:href>(.*?)</d:href>", block)
-            dname = re.search(r"<d:displayname>(.*?)</d:displayname>", block)
-            if href:
+            if "VEVENT" not in block:
+                continue
+            href = re.search(r"<href[^>]*>(.*?)</href>", block)
+            dname = re.search(r"<displayname[^>]*>(.*?)</displayname>", block)
+            if href and dname:
                 url = (
                     href.group(1)
                     if href.group(1).startswith("http")
                     else CALDAV_BASE + href.group(1)
                 )
-                name = dname.group(1) if dname else ""
+                name = dname.group(1)
                 calendars.append((name, url))
 
         print(f"✓ Available calendars: {[c[0] for c in calendars]}")
@@ -300,13 +293,13 @@ class CalDAVClient:
         resp = self._request("REPORT", self.calendar_url, body, {"Depth": "1"})
         events = []
         for response in re.finditer(
-            r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
+            r"<response[^>]*>(.*?)</response>", resp.text, re.DOTALL
         ):
             block = response.group(1)
             ical = re.search(
-                r"<c:calendar-data[^>]*>(.*?)</c:calendar-data>", block, re.DOTALL
+                r"<calendar-data[^>]*>(.*?)</calendar-data>", block, re.DOTALL
             )
-            href = re.search(r"<d:href>(.*?)</d:href>", block)
+            href = re.search(r"<href[^>]*>(.*?)</href>", block)
             if not ical or not href:
                 continue
             ical_text = ical.group(1)
@@ -380,12 +373,6 @@ def sync():
     print("=== ClassPass Calendar Sync ===")
 
     raw = classpass_login_and_fetch()
-
-    if raw:
-        r = raw[0]
-        print(f'DEBUG starttime raw value: {repr(r.get("starttime"))}')
-        print(f'DEBUG class raw value: {repr(r.get("class"))}')
-
     bookings = [parse_reservation(r) for r in raw]
     bookings = [b for b in bookings if b]
     print(f"✓ Parsed {len(bookings)} valid booking(s)")
