@@ -23,7 +23,6 @@ CALDAV_BASE = "https://caldav.icloud.com"
 
 
 def classpass_login_and_fetch():
-    """Log in and fetch reservations entirely within the browser to avoid Cloudflare."""
     from playwright.sync_api import sync_playwright
 
     token = None
@@ -57,9 +56,9 @@ def classpass_login_and_fetch():
 
         print("→ Opening ClassPass login page...")
         page.goto(f"{CLASSPASS_BASE}/login", wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
 
         print("→ Dismissing consent banners...")
-        page.wait_for_timeout(1000)
         page.evaluate(
             """
             ["trustarc-banner-overlay", "consent_blackbar"].forEach(function(id) {
@@ -136,7 +135,6 @@ def classpass_login_and_fetch():
 def parse_reservation(r):
     res_id = str(r.get("id") or uuid.uuid4())
 
-    # Class details are nested under 'class' and 'venue'
     class_obj = r.get("class") or {}
     venue_obj = r.get("venue") or {}
 
@@ -204,7 +202,7 @@ class CalDAVClient:
 </d:propfind>""",
                     {"Depth": "0"},
                 )
-                print(f"DEBUG CalDAV {url}: {resp.status_code} {resp.text[:500]}")
+                print(f"DEBUG CalDAV {url}: {resp.status_code} {resp.text[:300]}")
                 match = re.search(r"<[^>]*href[^>]*>(.*?)</[^>]*href>", resp.text)
                 if match:
                     principal_url = match.group(1)
@@ -224,7 +222,7 @@ class CalDAVClient:
   <d:prop><c:calendar-home-set/></d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", principal_url, body, {"Depth": "0"})
-        print(f"DEBUG calendar-home-set response: {resp.status_code} {resp.text[:500]}")
+        print(f"DEBUG calendar-home-set: {resp.status_code} {resp.text[:300]}")
 
         home = re.search(
             r"calendar-home-set.*?<[^>]*href[^>]*>(.*?)</[^>]*href>",
@@ -247,8 +245,6 @@ class CalDAVClient:
   </d:prop>
 </d:propfind>"""
         resp = self._request("PROPFIND", home_url, body, {"Depth": "1"})
-        print(f"DEBUG calendar list response: {resp.status_code} {resp.text[:500]}")
-
         calendars = []
         for response in re.finditer(
             r"<d:response>(.*?)</d:response>", resp.text, re.DOTALL
@@ -384,7 +380,6 @@ def sync():
 
     raw = classpass_login_and_fetch()
 
-    # Debug: print first reservation's keys so we can see the field names
     if raw:
         print(
             f"DEBUG first reservation keys: {list(raw[0].keys()) if isinstance(raw[0], dict) else raw[0]}"
@@ -393,6 +388,67 @@ def sync():
     bookings = [parse_reservation(r) for r in raw]
     bookings = [b for b in bookings if b]
     print(f"✓ Parsed {len(bookings)} valid booking(s)")
+
+    client = CalDAVClient(APPLE_ID, APPLE_APP_PASSWORD)
+    client.discover()
+    existing = client.get_classpass_events()
+
+    existing_keys = set()
+    for ev in existing:
+        if ev["summary"] and ev["dtstart"]:
+            existing_keys.add(ev["summary"] + "|" + ev["dtstart"][:8])
+
+    booking_keys = set()
+    to_add = []
+    for b in bookings:
+        start = datetime.fromisoformat(b["startDate"].replace("Z", "+00:00"))
+        title = f'{b["className"]} @ {b["studio"]}'
+        key = title + "|" + start.strftime("%Y%m%d")
+        booking_keys.add(key)
+        if key not in existing_keys:
+            to_add.append(b)
+
+    to_remove = []
+    for ev in existing:
+        if ev["summary"] and ev["dtstart"]:
+            key = ev["summary"] + "|" + ev["dtstart"][:8]
+            if key not in booking_keys:
+                to_remove.append(ev)
+
+    print(f"\n→ To add:    {len(to_add)}")
+    print(f"→ To remove: {len(to_remove)}")
+
+    created = 0
+    removed = 0
+    errors = []
+
+    for b in to_add:
+        try:
+            client.create_event(b)
+            print(
+                f'  ✓ Added: {b["className"]} @ {b["studio"]} on {b["startDate"][:10]}'
+            )
+            created += 1
+        except Exception as e:
+            msg = f'Failed to add "{b["className"]}": {e}'
+            print(f"  ✗ {msg}")
+            errors.append(msg)
+
+    for ev in to_remove:
+        try:
+            client.delete_event(ev["href"])
+            print(f'  ✓ Removed: {ev["summary"]}')
+            removed += 1
+        except Exception as e:
+            msg = f'Failed to remove "{ev["summary"]}": {e}'
+            print(f"  ✗ {msg}")
+            errors.append(msg)
+
+    print(f"\n=== Done: {created} added, {removed} removed, {len(errors)} errors ===")
+    if errors:
+        for e in errors:
+            print(f"  ✗ {e}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
