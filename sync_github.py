@@ -10,9 +10,9 @@ import os
 import re
 import json
 import uuid
+import base64
 import requests
 from datetime import datetime, timezone, timedelta
-from xml.etree import ElementTree as ET
 
 # ── Config from environment variables ──────────────────────────────────────
 CLASSPASS_EMAIL    = os.environ['CLASSPASS_EMAIL']
@@ -24,67 +24,92 @@ CALENDAR_NAME      = os.environ.get('CALENDAR_NAME', 'pilates 🤸')
 CLASSPASS_BASE = 'https://classpass.com'
 CALDAV_BASE    = 'https://caldav.icloud.com'
 
-# ── ClassPass auth ──────────────────────────────────────────────────────────
+# ── ClassPass auth (via Playwright headless browser) ────────────────────────
 
 def classpass_login():
-    """Log in to ClassPass and return an authenticated session with token."""
+    """Log in to ClassPass using a real headless browser to bypass Cloudflare."""
+    from playwright.sync_api import sync_playwright
+
+    token   = None
+    user_id = None
+    cookies = None
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1280, 'height': 800},
+            locale='en-GB',
+        )
+        page = context.new_page()
+
+        # Intercept API responses to grab token and user ID
+        def handle_response(response):
+            nonlocal token, user_id
+            if '_api/bff/v1' in response.url and response.status == 200:
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        t = body.get('auth_token') or body.get('authToken')
+                        if t:
+                            token = t
+                        u = body.get('id') or body.get('user_id') or body.get('userId')
+                        if u:
+                            user_id = u
+                except Exception:
+                    pass
+
+        page.on('response', handle_response)
+
+        print('→ Opening ClassPass login page...')
+        page.goto(f'{CLASSPASS_BASE}/login', wait_until='networkidle')
+
+        print('→ Filling credentials...')
+        page.fill('input[type="email"], input[name="email"]', CLASSPASS_EMAIL)
+        page.fill('input[type="password"], input[name="password"]', CLASSPASS_PASSWORD)
+        page.click('button[type="submit"]')
+
+        print('→ Waiting for login...')
+        page.wait_for_url('**/profile/**', timeout=15000)
+
+        # Extract token from CP.SID cookie if not intercepted
+        if not token:
+            all_cookies = context.cookies()
+            cp_sid = next((c['value'] for c in all_cookies if c['name'] == 'CP.SID'), None)
+            if cp_sid:
+                try:
+                    padded = cp_sid + '=='
+                    decoded = json.loads(base64.b64decode(padded).decode())
+                    token = decoded.get('authToken')
+                except Exception:
+                    pass
+
+        if not token:
+            raise Exception('Could not extract auth token after login')
+
+        # Navigate to upcoming to get user_id if still missing
+        if not user_id:
+            page.goto(f'{CLASSPASS_BASE}/profile/upcoming', wait_until='networkidle')
+            # user_id should be captured via response interceptor now
+
+        cookies = context.cookies()
+        browser.close()
+
+    print(f'✓ Logged into ClassPass (user_id: {user_id})')
+
+    # Build a requests session using the browser cookies
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'cp-authorization': f'Token {token}',
+        'platform': 'web',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
-        'platform': 'web',
-        'Referer': 'https://classpass.com/login',
     })
+    for c in cookies:
+        session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''))
 
-    # Get CSRF / initial cookies
-    session.get(f'{CLASSPASS_BASE}/login')
-
-    # Attempt login
-    payload = {
-        'email': CLASSPASS_EMAIL,
-        'password': CLASSPASS_PASSWORD,
-    }
-
-    resp = session.post(
-        f'{CLASSPASS_BASE}/_api/bff/v1/login',
-        json=payload,
-    )
-
-    if resp.status_code != 200:
-        raise Exception(f'ClassPass login failed: {resp.status_code} {resp.text[:200]}')
-
-    data = resp.json()
-    token = data.get('auth_token') or data.get('authToken')
-
-    # Also try extracting from CP.SID cookie
-    if not token:
-        cp_sid = session.cookies.get('CP.SID')
-        if cp_sid:
-            import base64
-            try:
-                decoded = json.loads(base64.b64decode(cp_sid + '==').decode())
-                token = decoded.get('authToken')
-            except Exception:
-                pass
-
-    if not token:
-        raise Exception(f'Could not extract auth token from login response: {resp.text[:200]}')
-
-    session.headers.update({'cp-authorization': f'Token {token}'})
-    print(f'✓ Logged into ClassPass')
-    return session, token
-
-
-def get_user_id(session):
-    """Get the ClassPass user ID."""
-    resp = session.get(f'{CLASSPASS_BASE}/_api/bff/v1/users/me')
-    if resp.status_code != 200:
-        raise Exception(f'Could not get user info: {resp.status_code}')
-    data = resp.json()
-    user_id = data.get('id') or data.get('user_id')
-    print(f'✓ User ID: {user_id}')
-    return user_id
+    return session, token, user_id
 
 
 def get_reservations(session, user_id):
@@ -97,8 +122,6 @@ def get_reservations(session, user_id):
         raise Exception(f'Could not fetch reservations: {resp.status_code} {resp.text[:200]}')
 
     data = resp.json()
-
-    # Handle different response shapes
     reservations = data if isinstance(data, list) else data.get('reservations', data.get('data', []))
     print(f'✓ Found {len(reservations)} upcoming reservation(s)')
     return reservations
@@ -323,9 +346,9 @@ def sync():
     print('=== ClassPass Calendar Sync ===')
 
     # 1. Login to ClassPass
-    session, _ = classpass_login()
-    user_id    = get_user_id(session)
-    raw        = get_reservations(session, user_id)
+    session, _, user_id = classpass_login()
+
+    raw = get_reservations(session, user_id)
 
     # 2. Parse reservations
     bookings = [parse_reservation(r) for r in raw]
